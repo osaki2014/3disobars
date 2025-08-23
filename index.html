@@ -1,0 +1,762 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>3D等圧線ビューアー</title>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.158.0/examples/jsm/"
+  }
+}
+</script>
+
+<style>
+  :root { --bg:#bfbfbf; --panel:#f8fafc; --muted:#6b7280; --border:#c8ced6; }
+  html,body{height:100%;margin:0;background:var(--bg);color:#0f172a;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Hiragino Kaku Gothic ProN",Meiryo,sans-serif}
+  #app{display:grid;grid-template-columns:1fr 400px;grid-template-rows:56px 1fr;height:100%}
+  #app[data-panel="closed"]{grid-template-columns:1fr 0px;}
+  header{grid-column:1/-1;display:flex;align-items:center;gap:.6rem;padding:.5rem .9rem;border-bottom:1px solid var(--border);background:#f3f5f7}
+  header h1{font-size:15px;margin:0;color:#0f172a}
+  header .sp{flex:1}
+  header a{font-size:13px;color:#0b57d0;text-decoration:none}
+  header a:hover{text-decoration:underline}
+  header button,header label,header select{background:#fff;border:1px solid var(--border);color:#0f172a;padding:.45rem .7rem;border-radius:.5rem;cursor:pointer;font-size:13px}
+  header input[type=file]{display:none}
+  #viewer{position:relative;background:#fff}
+  #c{width:100%;height:100%}
+  /* ステータスは非表示 */
+  #status{display:none}
+  #overlay{position:absolute;left:12px;bottom:12px;padding:.45rem .6rem;background:#ffffffcc;border:1px solid var(--border);border-radius:.6rem;font-size:12px;color:#334155}
+  #sidebar{background:var(--panel);border-left:1px solid var(--border);overflow:auto;padding:.8rem}
+  #app[data-panel="closed"] #sidebar{display:none}
+  .section{margin-bottom:1rem}
+  .section h2{font-size:13px;margin:.3rem 0;color:#0f172a}
+  .row{display:grid;grid-template-columns:1fr auto;gap:.6rem;align-items:center;margin:.45rem 0}
+  .row label{font-size:12px;color:var(--muted)}
+  #list{display:grid;gap:.6rem}
+  .card{border:1px solid var(--border);background:#fff;border-radius:.6rem;padding:.6rem}
+  .card .t{display:flex;gap:.5rem;align-items:center;margin-bottom:.3rem}
+  .chip{display:inline-flex;align-items:center;gap:.4rem;border:1px solid var(--border);background:#f3f5f7;padding:.2rem .5rem;border-radius:999px;font-size:12px}
+  .small{font-size:12px}
+  .muted{color:#6b7280;font-size:12px;margin-left:.4rem}
+  canvas.grabbing{cursor:grabbing}
+  canvas.hovering{cursor:ns-resize}
+  /* ドラッグ中HUD */
+  #dragHud{
+    position:absolute; pointer-events:none; transform:translate(-50%,-130%);
+    padding:.25rem .45rem; font-size:12px; border-radius:.4rem;
+    background:#000000a0; color:#fff; border:1px solid #00000040;
+    display:none; white-space:nowrap;
+  }
+</style>
+</head>
+<body>
+<div id="app" data-panel="open">
+  <header>
+    <h1>3D等圧線ビューアー</h1>
+
+    <a href="https://www.data.jma.go.jp/yoho/wxchart/quickmonthly.html" target="_blank" rel="noopener noreferrer">
+      気象庁による過去の実況天気図
+    </a>
+
+    <span class="sp"></span>
+
+    <!-- 投影法切替 -->
+    <select id="projection">
+      <option value="persp" selected>透視図法（Perspective）</option>
+      <option value="ortho">正射影図法（Orthographic）</option>
+    </select>
+
+    <!-- ビュー切替 -->
+    <select id="viewSelect">
+      <option value="all">斜め視点</option>
+      <option value="top">真上視点（XY）</option>
+      <option value="front">正面視点（ZX）</option>
+      <option value="side">側面視点（ZY）</option>
+    </select>
+
+    <!-- ファイル -->
+    <label for="file">SVG/SVGZを開く</label><input id="file" type="file" accept=".svg,.svgz,image/svg+xml,application/gzip">
+
+    <!-- パネル開閉 -->
+    <button id="panelToggle">パネル</button>
+  </header>
+
+  <div id="viewer">
+    <canvas id="c"></canvas>
+    <div id="status">起動OK</div>
+    <div id="overlay">左ドラッグ:回転 / 右ドラッグ:平行移動 / ホイール:ズーム / 線上ドラッグ:高さ変更（Shift=微調整 / Alt=粗調整）</div>
+    <div id="dragHud"></div>
+  </div>
+
+  <aside id="sidebar">
+    <div class="section">
+      <h2>全体設定</h2>
+      <div class="row"><label>背景色</label><input id="bgColor" type="color" value="#bfbfbf"></div>
+      <div class="row"><label>基準（軸＆キューブ）表示</label><input id="basisVisible" type="checkbox" checked></div>
+      <div class="row"><label>グリッド表示（XY/ZX）</label><input id="gridVisible" type="checkbox" checked></div>
+      <div class="row"><label>高さ倍率（Z）</label><input id="heightScale" type="range" min="0.1" max="20" step="0.1" value="5"></div>
+      <div class="row"><label>ドラッグ感度（px→高さ）</label><input id="dragSensitivity" type="range" min="0.05" max="2.0" step="0.05" value="0.25"></div>
+      <div class="row"><label>サンプリング密度（新規読込時）</label><input id="sample" type="range" min="32" max="1000" step="1" value="240"></div>
+    </div>
+
+    <div class="section">
+      <h2>天気図画像（下敷き）</h2>
+      <div class="row"><label>表示</label><input id="imgVisible" type="checkbox" checked></div>
+      <div class="row"><label>不透明度</label><input id="imgOpacity" type="range" min="0" max="1" step="0.01" value="0.85"></div>
+      <div class="row"><label>高さ（Zオフセット）</label><input id="imgHeight" type="range" min="-200" max="200" step="0.1" value="-0.1"></div>
+    </div>
+
+    <div class="section">
+      <h2>自動高さ（ラベル順・色も連動）</h2>
+      <div class="row"><label>有効</label><input id="autoMode" type="checkbox" checked></div>
+      <div class="row"><label>間隔倍率</label><input id="gapFactor" type="range" min="0.2" max="3" step="0.05" value="1"></div>
+      <div class="row"><label>平坦 ←→ 初期間隔</label><input id="autoBlend" type="range" min="0" max="1" step="0.01" value="1"></div>
+      <div class="row"><span class="muted" id="labelInfo">ラベル未解析</span><span></span></div>
+    </div>
+
+    <div class="section">
+      <h2>等高線リスト</h2>
+      <div id="list"></div>
+    </div>
+  </aside>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { SVGLoader } from 'three/addons/loaders/SVGLoader.js';
+import { FontLoader } from 'three/addons/loaders/FontLoader.js';
+import { TextGeometry } from 'three/addons/geometries/TextGeometry.js';
+import * as pako from 'https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.esm.mjs';
+
+/* ========== 基本セットアップ ========== */
+const appRoot = document.getElementById('app');
+const canvas = document.getElementById('c');
+const dragHud = document.getElementById('dragHud');
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+const scene = new THREE.Scene(); scene.background = new THREE.Color('#bfbfbf');
+
+/* --- カメラ（透視／正射影） --- */
+let controls;
+let camera;
+const perspCamera = new THREE.PerspectiveCamera(50, 1, 0.1, 50000);
+perspCamera.up.set(0,0,1);
+perspCamera.position.set(450, 300, 200);
+
+const orthoCamera = new THREE.OrthographicCamera(-500,500,500,-500, -50000, 50000);
+orthoCamera.up.set(0,0,1);
+orthoCamera.position.copy(perspCamera.position);
+
+function makeControls(cam){
+  if (controls) controls.dispose();
+  controls = new OrbitControls(cam, renderer.domElement);
+  controls.enableDamping = true;
+  controls.screenSpacePanning = false;
+}
+function setOrthoFrustum(){
+  const v = document.getElementById('viewer');
+  const aspect = v.clientWidth / v.clientHeight;
+  const box = new THREE.Box3().setFromObject(chartGroup);
+  if (!box.isEmpty()){
+    const size = new THREE.Vector3(); box.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z, 100);
+    const halfH = maxDim * 0.7;
+    const halfW = halfH * aspect;
+    orthoCamera.left=-halfW; orthoCamera.right=halfW; orthoCamera.top=halfH; orthoCamera.bottom=-halfH;
+    orthoCamera.near=-maxDim*10; orthoCamera.far=maxDim*10;
+  }else{
+    const halfH = 400, halfW = halfH * aspect;
+    orthoCamera.left=-halfW; orthoCamera.right=halfW; orthoCamera.top=halfH; orthoCamera.bottom=-halfH;
+    orthoCamera.near=-5000; orthoCamera.far=5000;
+  }
+  orthoCamera.updateProjectionMatrix();
+}
+function usePerspective(){
+  perspCamera.position.copy(camera.position);
+  camera = perspCamera; makeControls(camera);
+  controls.target.copy(_target); controls.update();
+}
+function useOrthographic(){
+  orthoCamera.position.copy(camera.position);
+  setOrthoFrustum();
+  camera = orthoCamera; makeControls(camera);
+  controls.target.copy(_target); controls.update();
+}
+let _target = new THREE.Vector3(0,0,0);
+camera = perspCamera; makeControls(camera);
+
+/* --- 照明 --- */
+scene.add(new THREE.AmbientLight(0xffffff,0.55));
+const dl = new THREE.DirectionalLight(0xffffff,0.9); dl.position.set(400,300,500); scene.add(dl);
+
+/* --- グリッド（XY と ZX）【白／間隔10】 --- */
+const gridXY = new THREE.GridHelper(1000, 100, 0xffffff, 0xffffff);
+gridXY.rotation.x = Math.PI/2; // XY（法線+Z）
+scene.add(gridXY);
+
+const gridZX = new THREE.GridHelper(1000, 100, 0xffffff, 0xffffff); // XZ = 正面面
+gridZX.material.opacity = 0.5;
+gridZX.material.transparent = true;
+scene.add(gridZX);
+
+/* --- 基準（矢印＋XYZ文字＋色分けキューブ） --- */
+const basis = new THREE.Group();
+const arrowHelperX = new THREE.ArrowHelper(new THREE.Vector3(1,0,0), new THREE.Vector3(0,0,0), 300, 0xff0000, 50, 20);
+const arrowHelperY = new THREE.ArrowHelper(new THREE.Vector3(0,1,0), new THREE.Vector3(0,0,0), 300, 0x00ff00, 50, 20);
+const arrowHelperZ = new THREE.ArrowHelper(new THREE.Vector3(0,0,1), new THREE.Vector3(0,0,0), 300, 0x0000ff, 50, 20);
+basis.add(arrowHelperX, arrowHelperY, arrowHelperZ);
+
+const fontLoader = new FontLoader();
+fontLoader.load(
+  'https://threejs.org/examples/fonts/helvetiker_regular.typeface.json',
+  (font)=>{
+    const makeChr=(ch,color,pos)=>{ const g=new TextGeometry(ch,{font,size:40,height:5}); g.computeBoundingBox(); const m=new THREE.MeshBasicMaterial({color}); const mesh=new THREE.Mesh(g,m); const w=g.boundingBox.max.x-g.boundingBox.min.x; mesh.position.set(pos.x - w/2, pos.y, pos.z); basis.add(mesh); };
+    makeChr('X',0xff0000,{x:320,y:-20,z:0});
+    makeChr('Y',0x00ff00,{x:0,y:320,z:0});
+    makeChr('Z',0x0000ff,{x:0,y:-20,z:320});
+  },
+  undefined,
+  ()=>console.warn('字体の読み込みに失敗しました（軸ラベルは非表示で続行）')
+);
+
+const cubeGeometry = new THREE.BoxGeometry(60,60,60);
+const cubeMaterials = [
+  new THREE.MeshStandardMaterial({ color: 0xff0000, roughness: 0.4, metalness: 0.1 }),
+  new THREE.MeshStandardMaterial({ color: 0xff0000, roughness: 0.4, metalness: 0.1 }),
+  new THREE.MeshStandardMaterial({ color: 0x00ff00, roughness: 0.4, metalness: 0.1 }),
+  new THREE.MeshStandardMaterial({ color: 0x00ff00, roughness: 0.4, metalness: 0.1 }),
+  new THREE.MeshStandardMaterial({ color: 0x0000ff, roughness: 0.4, metalness: 0.1 }),
+  new THREE.MeshStandardMaterial({ color: 0x0000ff, roughness: 0.4, metalness: 0.1 })
+];
+const cube = new THREE.Mesh(cubeGeometry, cubeMaterials); cube.position.set(0,0,30);
+basis.add(cube);
+scene.add(basis);
+
+/* --- データ配置 --- */
+const chartGroup = new THREE.Group(); scene.add(chartGroup);
+const rootLines = new THREE.Group(); chartGroup.add(rootLines);
+
+let items = []; // {mesh,height,color,ui,centroid:{x,y},pressure?:number, area?:number, autoTarget?:number}
+let weatherPlane = null;
+let lastSvgDims = null; // {w,h}
+let lastRawSvgText = "";
+let baseMaxHeight = 100; // 自動高さ配置の最大値を100に固定
+const labelInfo = document.getElementById('labelInfo');
+
+/* ========== レイアウト/ループ ========== */
+function resize(){
+  const v = document.getElementById('viewer');
+  renderer.setSize(v.clientWidth, v.clientHeight, false);
+  if (camera.isPerspectiveCamera){
+    camera.aspect = v.clientWidth / v.clientHeight; camera.updateProjectionMatrix();
+  } else {
+    setOrthoFrustum();
+  }
+}
+addEventListener('resize', resize); resize();
+
+(function animate(){ requestAnimationFrame(animate); controls.update(); renderer.render(scene,camera); })();
+
+/* ビュー操作 */
+function fitView(target=chartGroup){
+  const b = new THREE.Box3().setFromObject(target);
+  const sz = new THREE.Vector3(), cen = new THREE.Vector3();
+  b.getSize(sz); b.getCenter(cen); if (!(isFinite(sz.x)&&isFinite(sz.y))) return;
+  _target.copy(cen);
+
+  if (camera.isPerspectiveCamera){
+    const maxDim = Math.max(sz.x,sz.y,sz.z);
+    const dist = maxDim*1.2/Math.tan(THREE.MathUtils.degToRad(perspCamera.fov*0.5));
+    const dir = new THREE.Vector3(0.75,0.55,0.35).normalize();
+    camera.position.copy(cen.clone().add(dir.multiplyScalar(dist)));
+    camera.near = Math.max(0.1,dist/1000); camera.far = dist*1000; camera.updateProjectionMatrix();
+  } else {
+    setOrthoFrustum();
+    camera.position.copy(new THREE.Vector3(0.75,0.55,0.35).normalize().multiplyScalar(Math.max(sz.x,sz.y,sz.z)*2.0).add(cen));
+  }
+  controls.target.copy(cen); controls.update();
+}
+function viewTop(){
+  const b = new THREE.Box3().setFromObject(chartGroup), c=new THREE.Vector3(), s=new THREE.Vector3(); b.getCenter(c); b.getSize(s);
+  const dist = Math.max(s.x,s.y,s.z)*2.0 + 1;
+  camera.position.set(c.x, c.y, c.z + dist);
+  _target.copy(c); controls.target.copy(c); controls.update();
+  if (!camera.isPerspectiveCamera) setOrthoFrustum();
+}
+function viewFront(){ // ZX 面を見る: -Y 方向
+  const b = new THREE.Box3().setFromObject(chartGroup), c=new THREE.Vector3(), s=new THREE.Vector3(); b.getCenter(c); b.getSize(s);
+  const dist = Math.max(s.x,s.y,s.z)*2.0 + 1;
+  camera.position.set(c.x, c.y - dist, c.z);
+  _target.copy(c); controls.target.copy(c); controls.update();
+  if (!camera.isPerspectiveCamera) setOrthoFrustum();
+}
+function viewSide(){  // ZY 面を見る: +X 方向
+  const b = new THREE.Box3().setFromObject(chartGroup), c=new THREE.Vector3(), s=new THREE.Vector3(); b.getCenter(c); b.getSize(s);
+  const dist = Math.max(s.x,s.y,s.z)*2.0 + 1;
+  camera.position.set(c.x + dist, c.y, c.z);
+  _target.copy(c); controls.target.copy(c); controls.update();
+  if (!camera.isPerspectiveCamera) setOrthoFrustum();
+}
+
+/* ========== 読み込み（堅牢） ========== */
+function tryDecodeUtf8(u8){
+  try{ const txt = new TextDecoder("utf-8",{fatal:false}).decode(u8); if (txt.includes("<svg") || txt.includes("<?xml")) return txt; }catch{}
+  return null;
+}
+async function readSvgOrSvgz(file){
+  const buf = await file.arrayBuffer(); const u8  = new Uint8Array(buf);
+  const plain = tryDecodeUtf8(u8); if (plain) return plain;
+  const isGzip = u8.length>=2 && u8[0]===0x1f && u8[1]===0x8b;
+  if (isGzip || (file.name||"").toLowerCase().endsWith(".svgz")){
+    try{ const t = new TextDecoder("utf-8").decode(pako.ungzip(u8)); if (t.includes("<svg")) return t; }catch(e1){
+      try{ const t = new TextDecoder("utf-8").decode(pako.inflate(u8)); if (t.includes("<svg")) return t; }catch(e2){
+        try{ const t = new TextDecoder("utf-8").decode(pako.inflateRaw(u8)); if (t.includes("<svg")) return t; }catch(e3){}
+      }
+    }
+  }
+  const fallback = new TextDecoder("utf-8",{fatal:false}).decode(u8);
+  if (fallback && fallback.includes("<svg")) return fallback;
+  throw new Error("SVGZの解凍に失敗しました。");
+}
+
+function readSvgDims(svgEl){
+  const vb = svgEl.getAttribute("viewBox");
+  if (vb){ const a=vb.trim().split(/\s+|,/).map(Number); if (a.length===4&&a.every(n=>isFinite(n))) return {w:a[2],h:a[3]}; }
+  const w=parseFloat((svgEl.getAttribute("width")||"").replace(/[^\d.]+/g,""));
+  const h=parseFloat((svgEl.getAttribute("height")||"").replace(/[^\d.]+/g,""));
+  if (isFinite(w)&&isFinite(h)&&w>0&&h>0) return {w,h};
+  return {w:1000,h:1000};
+}
+
+/* ========== 天気図画像（Y軸反転） ========== */
+async function buildOrUpdateWeatherPlane(rawSvgText){
+  if(!lastSvgDims) return;
+  const {w,h} = lastSvgDims;
+
+  const dataUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(rawSvgText);
+  const tex = await new THREE.TextureLoader().loadAsync(dataUrl);
+  tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = renderer.capabilities.getMaxAnisotropy(); tex.flipY = false;
+
+  const imgOpacityEl = document.getElementById('imgOpacity');
+  const opacity = imgOpacityEl ? parseFloat(imgOpacityEl.value) : 0.85;
+
+  const mat = new THREE.MeshBasicMaterial({
+    map: tex, transparent:true, opacity: opacity, side: THREE.DoubleSide
+  });
+  const geom = new THREE.PlaneGeometry(w,h); // XY
+
+  if(!weatherPlane){
+    weatherPlane = new THREE.Mesh(geom, mat);
+    weatherPlane.renderOrder = -1;
+    chartGroup.add(weatherPlane);
+  }else{
+    weatherPlane.geometry.dispose(); weatherPlane.material.map?.dispose(); weatherPlane.material.dispose();
+    weatherPlane.geometry = geom; weatherPlane.material = mat;
+  }
+  weatherPlane.scale.y = -Math.abs(weatherPlane.scale.y); // 画像をY反転
+  applyImageUI();
+}
+
+/* ========== SVG → 等圧線（Yのみ反転） ========== */
+function centroidXY(points){ let sx=0,sy=0; for(const p of points){sx+=p.x;sy+=p.y;} const n=points.length||1; return {x:sx/n,y:sy/n}; }
+function polygonArea(pts){ let a=0; for(let i=0;i<pts.length;i++){ const p=pts[i], q=pts[(i+1)%pts.length]; a+= p.x*q.y - q.x*p.y; } return Math.abs(a)/2; }
+
+async function loadSVGFromString(text){
+  rootLines.clear(); items=[]; document.getElementById('list').innerHTML='';
+
+  const loader = new SVGLoader(); let data;
+  try{ data = loader.parse(text); }catch(e){ console.error('SVG parse 失敗:', e); return; }
+
+  const linesGroup = new THREE.Group();
+  const sampleN = parseInt(document.getElementById('sample').value,10);
+
+  let count=0;
+  for(const p of data.paths){
+    const style=p.userData?.style||{};
+    const stroke=(style.stroke && style.stroke!=='none')?style.stroke:"#9aa4b2";
+    for(const sub of p.subPaths){
+      const pts2=sub.getPoints(Math.max(2,sampleN)); if(pts2.length<2) continue;
+      const pts3 = pts2.map(pt=>new THREE.Vector3(+pt.x, -pt.y, 0)); // 等圧線をY反転
+      const curve=new THREE.CatmullRomCurve3(pts3,false,'centripetal',0.5);
+      const seg=Math.max(16, Math.min(2048, Math.floor(pts3.length*1.5))); // 上限 2048
+      const geom=new THREE.TubeGeometry(curve, seg, 1.2, 8, false);
+      const mat=new THREE.MeshStandardMaterial({color:new THREE.Color(stroke), roughness:.6, metalness:.06, side: THREE.DoubleSide});
+      const mesh=new THREE.Mesh(geom, mat); mesh.userData.height=0;
+      const cen = centroidXY(pts2);
+      const area = polygonArea(pts2);
+      items.push({mesh,height:0,color:`#${new THREE.Color(stroke).getHexString()}`,ui:{},centroid:cen,pressure:undefined,area,autoTarget:0});
+      linesGroup.add(mesh); count++;
+    }
+  }
+
+  if(count===0){ fitView(chartGroup); return; }
+
+  // 中心化＆スケール
+  const box=new THREE.Box3().setFromObject(linesGroup);
+  const cen=new THREE.Vector3(), sz=new THREE.Vector3();
+  box.getCenter(cen); box.getSize(sz);
+  linesGroup.position.x=-cen.x; linesGroup.position.y=-cen.y;
+  const scale = 600/Math.max(sz.x,sz.y);
+  chartGroup.scale.setScalar(isFinite(scale)&&scale>0?scale:1);
+
+  rootLines.add(linesGroup);
+  await assignPressuresFromLabelsOrAreas();
+
+  if (document.getElementById('autoMode').checked) {
+    applyAutoHeights();
+  }
+
+  buildList(true);
+  updateColors(); // 初期着色
+  fitView(chartGroup);
+}
+
+/* ========== ラベル抽出 or 面積ベース自動配置 ========== */
+function parseTranslate(tf){
+  let tx=0, ty=0; if (!tf) return {tx,ty};
+  const m = tf.match(/matrix\(([^)]+)\)/);
+  if (m){ const a=m[1].split(/[ ,]+/).map(Number); if (a.length===6 && a.every(n=>isFinite(n))) { tx+=a[4]; ty+=a[5]; } }
+  const t = tf.match(/translate\(([^)]+)\)/);
+  if (t){ const a=t[1].split(/[ ,]+/).map(Number); if (a.length>=1) tx+=a[0]||0; if (a.length>=2) ty+=a[1]||0; }
+  return {tx,ty};
+}
+function estimateXY(el){
+  let x=parseFloat(el.getAttribute("x")||"0"), y=parseFloat(el.getAttribute("y")||"0"), cur=el;
+  while (cur && cur.nodeType===1){ const tf=cur.getAttribute && cur.getAttribute("transform"); const {tx,ty}=parseTranslate(tf||""); x+=tx; y+=ty; cur=cur.parentNode; }
+  return {x,y};
+}
+function readPressureLabels(svgText){
+  const doc = new DOMParser().parseFromString(svgText,"image/svg+xml");
+  const svg = doc.querySelector("svg"); if (!svg) return [];
+  const texts = [...doc.querySelectorAll("text")];
+  const labels = [];
+  for (const t of texts){
+    const raw = (t.textContent||"").trim();
+    const m = raw.match(/(-?\d{3,4})/);
+    if (!m) continue;
+    const val = parseInt(m[1],10);
+    if (!isFinite(val) || val < 800 || val > 1100) continue;
+    const {x,y} = estimateXY(t);
+    labels.push({x,y,value:val});
+  }
+  return labels;
+}
+
+async function assignPressuresFromLabelsOrAreas(){
+  const labs = readPressureLabels(lastRawSvgText);
+  const info = document.getElementById('labelInfo');
+  if (labs.length){
+    info.textContent = `検出ラベル: ${labs.length} 個`;
+    for (const it of items){
+      const {x,y} = it.centroid;
+      let best=null, bd=Infinity;
+      for (const lb of labs){ const dx=lb.x-x, dy=lb.y-y; const d=dx*dx+dy*dy; if (d<bd){bd=d; best=lb;} }
+      it.pressure = best?.value;
+    }
+  }else{
+    info.textContent = 'ラベルなし：面積ベースで自動配置';
+    const arr = items.slice().sort((a,b)=>a.area-b.area);
+    arr.forEach((it,idx)=>{ it.pressure = idx; });
+  }
+}
+
+/* ========== 自動高さ（間隔倍率 + 平坦←→初期ブレンド） ========== */
+function applyAutoHeights(){
+  const gf = parseFloat(document.getElementById('gapFactor').value);
+  const blend = parseFloat(document.getElementById('autoBlend').value);
+  const maxH = 100 * gf; // 最大高さを100に固定
+  const s    = parseFloat(document.getElementById('heightScale').value);
+
+  const withP = items.filter(it=>isFinite(it.pressure));
+  if (withP.length === 0){
+    for (const it of items){ it.autoTarget = 0; it.height = 0; it.mesh.position.z = 0; }
+    updateColors(); buildList(false); return;
+  }
+
+  withP.sort((a,b)=>a.pressure-b.pressure);
+  const n=withP.length;
+
+  withP.forEach((it,idx)=>{
+    const t = (n===1)?0:(idx/(n-1));
+    it.autoTarget = t*maxH;
+  });
+
+  for (const it of items){
+    const h = (it.autoTarget||0) * blend;
+    it.height = h;
+    it.mesh.position.z = h * s;
+  }
+
+  updateColors(); // 自動配置でも即時再着色（最大値が変わるため）
+}
+
+/* ========== 色（高さに連動：現在の最大高さに正規化） ========== */
+function currentMaxHeight(){
+  return items.length ? Math.max(0, ...items.map(it => it.height || 0)) : 0;
+}
+function colorFromHeight(h, maxH){
+  if (maxH <= 0 || h <= 0) return new THREE.Color(0xff0000); // Z=0以下は赤
+  const t = Math.min(Math.max(h/maxH, 0), 1);                 // 0→赤, 1→青
+  const c = new THREE.Color(); c.setHSL((2/3)*t, 1, 0.5);     // 0=赤, 2/3=青
+  return c;
+}
+function updateColors(){
+  const maxH = currentMaxHeight();
+  for (const it of items){
+    const col = colorFromHeight(it.height, maxH);
+    it.mesh.material.color.copy(col);
+    if (it.ui?.color) it.ui.color.value = `#${col.getHexString()}`;
+  }
+}
+
+/* ========== リスト & 交互作用 ========== */
+function buildList(orderByPressure=false){
+  const list=document.getElementById('list'); list.innerHTML='';
+  let arr = items.slice();
+  if (orderByPressure){
+    arr.sort((a,b)=>{
+      const ap = isFinite(a.pressure)?a.pressure:Infinity;
+      const bp = isFinite(b.pressure)?b.pressure:Infinity;
+      return ap-bp;
+    });
+  }
+  let i=0;
+  for(const it of arr){
+    const card=document.createElement('div'); card.className='card';
+    const t=document.createElement('div'); t.className='t';
+    const c=document.createElement('span'); c.className='chip'; c.textContent=`L${(++i).toString().padStart(3,'0')}`;
+    const color=document.createElement('input'); color.type='color'; color.value=it.color; color.disabled=true;
+    const tag=document.createElement('span'); tag.className='small muted';
+    tag.textContent = isFinite(it.pressure) ? `P=${it.pressure}` : `P=?`;
+    const hide=document.createElement('button'); hide.textContent='非表示'; hide.className='small';
+    hide.onclick=()=>{ it.mesh.visible=!it.mesh.visible; hide.textContent=it.mesh.visible?'非表示':'表示'; };
+    t.append(c,color,tag,hide); card.appendChild(t);
+
+    const row1=document.createElement('div'); row1.className='row';
+    const lab=document.createElement('label'); lab.textContent='高さ（Z）';
+    const slider=document.createElement('input'); slider.type='range'; slider.min=-2000; slider.max=2000; slider.step=0.1; slider.value=it.height;
+    slider.oninput=()=>{ 
+      it.height=parseFloat(slider.value); 
+      const s=parseFloat(document.getElementById('heightScale').value); 
+      it.mesh.position.z=it.height*s; 
+      num.value=it.height.toFixed(2); 
+      updateColors(); // ← 正規化が変わる可能性があるため全体再着色
+    };
+    row1.append(lab,slider); card.appendChild(row1);
+
+    const row2=document.createElement('div'); row2.className='row';
+    const hint=document.createElement('span'); hint.className='small'; hint.textContent='（手動でも調整可）';
+    const num=document.createElement('input'); num.type='number'; num.className='small'; num.step=0.1; num.style.width='100px'; num.value=it.height.toFixed(2);
+    num.onchange=()=>{ 
+      const v=parseFloat(num.value)||0; 
+      it.height=v; 
+      slider.value=v; 
+      const s=parseFloat(document.getElementById('heightScale').value); 
+      it.mesh.position.z=it.height*s; 
+      updateColors(); // ← 同上
+    };
+    row2.append(hint,num); card.appendChild(row2);
+
+    it.ui={slider,num,color};
+    list.appendChild(card);
+  }
+}
+
+/* ピッキング＆ドラッグ（HUD付き） */
+const raycaster=new THREE.Raycaster(); const pointer=new THREE.Vector2();
+let hover=null, drag=null, lastY=0;
+function pick(e){
+  const rect=canvas.getBoundingClientRect();
+  pointer.set((e.clientX-rect.left)/rect.width*2-1, -(e.clientY-rect.top)/rect.height*2+1);
+  raycaster.setFromCamera(pointer,camera);
+  const hits=raycaster.intersectObjects(items.filter(x=>x.mesh.visible).map(x=>x.mesh),false);
+  return hits[0]?items.find(x=>x.mesh===hits[0].object):null;
+}
+function updateHud(e, h){
+  const rect=canvas.getBoundingClientRect();
+  const x=e.clientX-rect.left, y=e.clientY-rect.top;
+  dragHud.style.left = x+'px'; dragHud.style.top = y+'px';
+
+  const maxH = currentMaxHeight();
+  const col = colorFromHeight(h, maxH);
+  const r = Math.round(col.r*255), g = Math.round(col.g*255), b = Math.round(col.b*255);
+  dragHud.style.background = `rgba(${r},${g},${b},0.9)`;
+  dragHud.style.borderColor = `rgba(0,0,0,0.25)`;
+  dragHud.textContent = `Z = ${h.toFixed(2)}`;
+}
+canvas.addEventListener('mousemove',e=>{
+  if(drag){
+    const dy=e.clientY-lastY; lastY=e.clientY;
+    let sens=parseFloat(document.getElementById('dragSensitivity').value);
+    if(e.shiftKey) sens*=0.2; if(e.altKey) sens*=3.0;
+    drag.height += -dy*sens;
+    const s=parseFloat(document.getElementById('heightScale').value);
+    drag.mesh.position.z = drag.height*s;
+    if(drag.ui?.slider) drag.ui.slider.value=drag.height;
+    if(drag.ui?.num)    drag.ui.num.value=drag.height.toFixed(2);
+
+    updateColors();         // ← 毎フレーム全体再着色（最大値が変動し得るため）
+    updateHud(e, drag.height);
+    return;
+  }
+  hover=pick(e); canvas.classList.toggle('hovering',!!hover);
+});
+canvas.addEventListener('mousedown',e=>{
+  if(e.button!==0) return;
+  const hit=pick(e);
+  if(hit){ 
+    drag=hit; lastY=e.clientY; controls.enabled=false; canvas.classList.add('grabbing');
+    dragHud.style.display='block'; updateHud(e, drag.height);
+  }
+});
+addEventListener('mouseup',()=>{ 
+  if(drag) updateColors(); // 念のため最終確定
+  drag=null; controls.enabled=true; canvas.classList.remove('grabbing');
+  dragHud.style.display='none';
+});
+
+/* ========== サイドバー/ビュー操作UI ========== */
+document.getElementById('bgColor').addEventListener('input',(e)=>{
+  scene.background = new THREE.Color(e.target.value);
+});
+document.getElementById('basisVisible').addEventListener('change',(e)=>{
+  basis.visible = e.target.checked;
+});
+document.getElementById('gridVisible').addEventListener('change',(e)=>{
+  const vis=e.target.checked; gridXY.visible=vis; gridZX.visible=vis;
+});
+document.getElementById('heightScale').addEventListener('input',()=>{
+  const s=parseFloat(document.getElementById('heightScale').value);
+  for(const it of items) it.mesh.position.z = it.height*s;
+  applyImageUI();
+  // 色は「生の高さ」で正規化しているので倍率変更では色は不変だが、
+  // 表示意図に応じて再着色するなら以下を有効化：
+  // updateColors();
+});
+document.getElementById('viewSelect').addEventListener('change',(e)=>{
+  const val = e.target.value;
+  if (val==='top') viewTop();
+  else if (val==='front') viewFront();
+  else if (val==='side') viewSide();
+  else fitView(chartGroup);
+});
+document.getElementById('panelToggle').addEventListener('click',()=>{
+  const isOpen = appRoot.getAttribute('data-panel')!=='closed';
+  appRoot.setAttribute('data-panel', isOpen ? 'closed' : 'open');
+  setTimeout(()=>{ resize(); }, 0);
+});
+
+/* 画像UI */
+function applyImageUI(){
+  if(!weatherPlane) return;
+  const vis=document.getElementById('imgVisible').checked;
+  const op =parseFloat(document.getElementById('imgOpacity').value);
+  const h  =parseFloat(document.getElementById('imgHeight').value);
+  weatherPlane.visible = vis;
+  weatherPlane.material.opacity = op;
+  const s=parseFloat(document.getElementById('heightScale').value);
+  weatherPlane.position.z = h*s;
+}
+['imgVisible','imgOpacity','imgHeight','heightScale'].forEach(id=>{
+  document.getElementById(id).addEventListener('input', applyImageUI);
+});
+
+/* 自動高さ：トグル＆倍率＆ブレンド */
+document.getElementById('autoMode').addEventListener('change',()=>{
+  const on = document.getElementById('autoMode').checked;
+  if (on) { applyAutoHeights(); }
+  else {
+    for (const it of items){
+      it.height=0; it.mesh.position.z=0;
+      if (it.ui?.slider) it.ui.slider.value=0;
+      if (it.ui?.num)    it.ui.num.value='0.00';
+    }
+    updateColors(); // 全て0なら全赤になる
+  }
+});
+document.getElementById('gapFactor').addEventListener('input',()=>{ if (document.getElementById('autoMode').checked) applyAutoHeights(); });
+document.getElementById('autoBlend').addEventListener('input',()=>{ if (document.getElementById('autoMode').checked) applyAutoHeights(); });
+
+/* 投影法のUI */
+document.getElementById('projection').addEventListener('change',(e)=>{
+  const val = e.target.value;
+  if (val==='ortho') useOrthographic(); else usePerspective();
+  fitView(chartGroup);
+});
+
+/* 起動時に UI と実体を同期 */
+function syncUI(){
+  document.getElementById('basisVisible').dispatchEvent(new Event('change'));
+  document.getElementById('gridVisible').dispatchEvent(new Event('change'));
+  document.getElementById('imgVisible').dispatchEvent(new Event('input'));
+  document.getElementById('heightScale').dispatchEvent(new Event('input'));
+}
+syncUI();
+
+/* ========== ファイル読込 ========== */
+document.getElementById('file').addEventListener('change', async (e)=>{
+  const f=e.target.files?.[0]; if(!f) return;
+  try{
+    const raw = await readSvgOrSvgz(f);
+    lastRawSvgText = raw;
+
+    const doc = new DOMParser().parseFromString(raw,"image/svg+xml");
+    const svg = doc.querySelector("svg"); if(svg) lastSvgDims = readSvgDims(svg);
+
+    await buildOrUpdateWeatherPlane(raw);
+    const onlyIsobars = extractIsobarsOnly(raw);
+    await loadSVGFromString(onlyIsobars);
+    fitView(chartGroup);
+  }catch(err){
+    console.error('読み込みエラー：', err);
+  }
+});
+
+/* ===== 等圧線だけ抽出（g#weatherChart g.contour） ===== */
+function extractIsobarsOnly(svgText){
+  const doc = new DOMParser().parseFromString(svgText,"image/svg+xml");
+  const svg = doc.querySelector("svg"); if(!svg) return svgText;
+  lastSvgDims = readSvgDims(svg);
+
+  const viewBox = svg.getAttribute("viewBox")||null;
+  const width   = svg.getAttribute("width")||null;
+  const height  = svg.getAttribute("height")||null;
+
+  const contours = svg.querySelectorAll('g#weatherChart g.contour');
+  const outDoc = document.implementation.createDocument("http://www.w3.org/2000/svg","svg",null);
+  const outSvg = outDoc.documentElement;
+  outSvg.setAttribute("xmlns","http://www.w3.org/2000/svg");
+  if (viewBox) outSvg.setAttribute("viewBox",viewBox);
+  if (width)   outSvg.setAttribute("width",width);
+  if (height)  outSvg.setAttribute("height",height);
+
+  const DEFAULT_STROKE="#9aa4b2";
+  contours.forEach(cont=>{
+    cont.querySelectorAll("path, polyline, circle, rect, ellipse").forEach(el=>{
+      const dup = el.cloneNode(true);
+      dup.setAttribute("fill","none");
+      if(!dup.getAttribute("stroke")||dup.getAttribute("stroke")==="none") dup.setAttribute("stroke",DEFAULT_STROKE);
+      if(!dup.getAttribute("stroke-width")) dup.setAttribute("stroke-width","1");
+      outSvg.appendChild(dup);
+    });
+  });
+  if(!outSvg.firstElementChild) return svgText;
+  return new XMLSerializer().serializeToString(outSvg);
+}
+
+/* 初期可視状態 */
+basis.visible = true;
+gridXY.visible = true;
+gridZX.visible = true;
+
+</script>
+</body>
+</html>

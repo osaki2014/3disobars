@@ -3,8 +3,9 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>3D等圧線ビューアー</title>
+<title>3D等圧線ビューアー（タッチ最適版）</title>
 
+<!-- three.js & addons via importmap -->
 <script type="importmap">
 {
   "imports": {
@@ -27,7 +28,7 @@
   header button,header label,header select{background:#fff;border:1px solid var(--border);color:#0f172a;padding:.45rem .7rem;border-radius:.5rem;cursor:pointer;font-size:13px}
   header input[type=file]{display:none}
   #viewer{position:relative;background:#fff}
-  #c{width:100%;height:100%; touch-action: none;} /* ← スクロール/ズームを抑止してドラッグを取りやすく */
+  #c{width:100%;height:100%}
   /* ステータスは非表示 */
   #status{display:none}
   #overlay{position:absolute;left:12px;bottom:12px;padding:.45rem .6rem;background:#ffffffcc;border:1px solid var(--border);border-radius:.6rem;font-size:12px;color:#334155}
@@ -89,7 +90,7 @@
   <div id="viewer">
     <canvas id="c"></canvas>
     <div id="status">起動OK</div>
-    <div id="overlay">左ドラッグ/スワイプ:回転 / 2本指:平行移動 / ピンチ:ズーム / 線上ドラッグ:高さ変更（PCは Shift=微 / Alt=粗）</div>
+    <div id="overlay">ドラッグ:回転 / 右ドラッグ:平行移動 / ホイール:ズーム / 線上ドラッグ:高さ変更（Shift=微 / Alt=粗）</div>
     <div id="dragHud"></div>
   </div>
 
@@ -100,7 +101,7 @@
       <div class="row"><label>基準（軸＆キューブ）表示</label><input id="basisVisible" type="checkbox" checked></div>
       <div class="row"><label>グリッド表示（XY/ZX）</label><input id="gridVisible" type="checkbox" checked></div>
       <div class="row"><label>高さ倍率（Z）</label><input id="heightScale" type="range" min="0.1" max="20" step="0.1" value="5"></div>
-      <div class="row"><label>ドラッグ感度（px→高さ）</label><input id="dragSensitivity" type="range" min="0.05" max="2.0" step="0.05" value="0.25"></div>
+      <div class="row"><label>ドラッグ感度（px→高さ）</label><input id="dragSensitivity" type="range" min="0.05" max="2.0" step="0.05" value="0.35"></div>
       <div class="row"><label>サンプリング密度（新規読込時）</label><input id="sample" type="range" min="32" max="1000" step="1" value="240"></div>
     </div>
 
@@ -120,7 +121,7 @@
     </div>
 
     <div class="section">
-      <h2>等高線リスト</h2>
+      <h2>等圧線リスト</h2>
       <div id="list"></div>
     </div>
   </aside>
@@ -133,6 +134,11 @@ import { SVGLoader } from 'three/addons/loaders/SVGLoader.js';
 import { FontLoader } from 'three/addons/loaders/FontLoader.js';
 import { TextGeometry } from 'three/addons/geometries/TextGeometry.js';
 import * as pako from 'https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.esm.mjs';
+
+/* ================== 使いやすさのための定数 ================== */
+// 見た目のパイプ半径（太め）と、当たり判定の太さ倍率
+const VISIBLE_TUBE_RADIUS = 3.0;   // 直径 6px 相当（従来より太い）
+const PICK_RADIUS_SCALE   = 2.8;   // 当たり判定は見た目の約3倍（つかみやすい）
 
 /* ========== 基本セットアップ ========== */
 const appRoot = document.getElementById('app');
@@ -244,11 +250,10 @@ scene.add(basis);
 const chartGroup = new THREE.Group(); scene.add(chartGroup);
 const rootLines = new THREE.Group(); chartGroup.add(rootLines);
 
-let items = []; // {mesh,height,color,ui,centroid:{x,y},pressure?:number, area?:number, autoTarget?:number}
+let items = []; // {mesh, pickMesh, height, color, ui, centroid:{x,y}, pressure?:number, area?:number, autoTarget?:number}
 let weatherPlane = null;
 let lastSvgDims = null; // {w,h}
 let lastRawSvgText = "";
-let baseMaxHeight = 100; // 自動高さ配置の最大値を100に固定
 const labelInfo = document.getElementById('labelInfo');
 
 /* ========== レイアウト/ループ ========== */
@@ -387,13 +392,23 @@ async function loadSVGFromString(text){
       const pts3 = pts2.map(pt=>new THREE.Vector3(+pt.x, -pt.y, 0)); // 等圧線をY反転
       const curve=new THREE.CatmullRomCurve3(pts3,false,'centripetal',0.5);
       const seg=Math.max(16, Math.min(2048, Math.floor(pts3.length*1.5))); // 上限 2048
-      const geom=new THREE.TubeGeometry(curve, seg, 1.2, 8, false);
-      const mat=new THREE.MeshStandardMaterial({color:new THREE.Color(stroke), roughness:.6, metalness:.06, side: THREE.DoubleSide});
-      const mesh=new THREE.Mesh(geom, mat); mesh.userData.height=0;
+
+      // 可視チューブ（太め）
+      const visGeom=new THREE.TubeGeometry(curve, seg, VISIBLE_TUBE_RADIUS, 12, false);
+      const visMat =new THREE.MeshStandardMaterial({color:new THREE.Color(stroke), roughness:.6, metalness:.06, side: THREE.DoubleSide});
+      const mesh   =new THREE.Mesh(visGeom, visMat);
+
+      // 当たり判定専用チューブ（さらに太く・超透明）
+      const pickGeom=new THREE.TubeGeometry(curve, seg, VISIBLE_TUBE_RADIUS*PICK_RADIUS_SCALE, 8, false);
+      const pickMat =new THREE.MeshBasicMaterial({color:0x000000, transparent:true, opacity:0.001, depthWrite:false});
+      const pickMesh=new THREE.Mesh(pickGeom, pickMat);
+      pickMesh.renderOrder=-1000;
+
       const cen = centroidXY(pts2);
       const area = polygonArea(pts2);
-      items.push({mesh,height:0,color:`#${new THREE.Color(stroke).getHexString()}`,ui:{},centroid:cen,pressure:undefined,area,autoTarget:0});
-      linesGroup.add(mesh); count++;
+
+      items.push({mesh, pickMesh, height:0, color:`#${new THREE.Color(stroke).getHexString()}`, ui:{}, centroid:cen, pressure:undefined, area, autoTarget:0});
+      linesGroup.add(mesh); linesGroup.add(pickMesh); count++;
     }
   }
 
@@ -440,12 +455,15 @@ function readPressureLabels(svgText){
   const labels = [];
   for (const t of texts){
     const raw = (t.textContent||"").trim();
-    const m = raw.match(/(-?\d{3,4})/);
-    if (!m) continue;
-    const val = parseInt(m[1],10);
-    if (!isFinite(val) || val < 800 || val > 1100) continue;
-    const {x,y} = estimateXY(t);
-    labels.push({x,y,value:val});
+    love:
+    {
+      const m = raw.match(/(-?\d{3,4})/);
+      if (!m) break love;
+      const val = parseInt(m[1],10);
+      if (!isFinite(val) || val < 800 || val > 1100) break love;
+      const {x,y} = estimateXY(t);
+      labels.push({x,y,value:val});
+    }
   }
   return labels;
 }
@@ -477,7 +495,7 @@ function applyAutoHeights(){
 
   const withP = items.filter(it=>isFinite(it.pressure));
   if (withP.length === 0){
-    for (const it of items){ it.autoTarget = 0; it.height = 0; it.mesh.position.z = 0; }
+    for (const it of items){ it.autoTarget = 0; it.height = 0; it.mesh.position.z = 0; it.pickMesh.position.z=0; }
     updateColors(); buildList(false); return;
   }
 
@@ -493,6 +511,7 @@ function applyAutoHeights(){
     const h = (it.autoTarget||0) * blend;
     it.height = h;
     it.mesh.position.z = h * s;
+    it.pickMesh.position.z = h * s; // ← 当たり判定も追従
   }
 
   updateColors(); // 自動配置でも即時再着色（最大値が変わるため）
@@ -537,7 +556,11 @@ function buildList(orderByPressure=false){
     const tag=document.createElement('span'); tag.className='small muted';
     tag.textContent = isFinite(it.pressure) ? `P=${it.pressure}` : `P=?`;
     const hide=document.createElement('button'); hide.textContent='非表示'; hide.className='small';
-    hide.onclick=()=>{ it.mesh.visible=!it.mesh.visible; hide.textContent=it.mesh.visible?'非表示':'表示'; };
+    hide.onclick=()=>{ 
+      const next = !(it.mesh.visible); 
+      it.mesh.visible = next; it.pickMesh.visible = next;
+      hide.textContent= next ? '非表示' : '表示'; 
+    };
     t.append(c,color,tag,hide); card.appendChild(t);
 
     const row1=document.createElement('div'); row1.className='row';
@@ -547,8 +570,9 @@ function buildList(orderByPressure=false){
       it.height=parseFloat(slider.value); 
       const s=parseFloat(document.getElementById('heightScale').value); 
       it.mesh.position.z=it.height*s; 
+      it.pickMesh.position.z=it.height*s; 
       num.value=it.height.toFixed(2); 
-      updateColors(); // 正規化が変わる可能性があるため全体再着色
+      updateColors(); // ← 正規化が変わる可能性があるため全体再着色
     };
     row1.append(lab,slider); card.appendChild(row1);
 
@@ -561,7 +585,8 @@ function buildList(orderByPressure=false){
       slider.value=v; 
       const s=parseFloat(document.getElementById('heightScale').value); 
       it.mesh.position.z=it.height*s; 
-      updateColors();
+      it.pickMesh.position.z=it.height*s;
+      updateColors(); // ← 同上
     };
     row2.append(hint,num); card.appendChild(row2);
 
@@ -570,120 +595,89 @@ function buildList(orderByPressure=false){
   }
 }
 
-/* ====== ピッキング：座標指定版（マウス/タッチ共通） ====== */
+/* ========== ピッキング＆ドラッグ（Pointer Events & HUD） ========== */
 const raycaster=new THREE.Raycaster(); const pointer=new THREE.Vector2();
+let draggingItem=null;
+let lastClientY=0;
+
 function pickFromClientXY(clientX, clientY){
   const rect=canvas.getBoundingClientRect();
   pointer.set((clientX-rect.left)/rect.width*2-1, -(clientY-rect.top)/rect.height*2+1);
   raycaster.setFromCamera(pointer,camera);
-  const hits=raycaster.intersectObjects(items.filter(x=>x.mesh.visible).map(x=>x.mesh),false);
-  return hits[0]?items.find(x=>x.mesh===hits[0].object):null;
+  // 可視アイテムの pickMesh を対象
+  const targets = items.filter(it=>it.mesh.visible && it.pickMesh.visible).map(it=>it.pickMesh);
+  const hits=raycaster.intersectObjects(targets,false);
+  if(!hits[0]) return null;
+  const obj=hits[0].object;
+  return items.find(it=> it.pickMesh===obj);
 }
-function updateHudAtClientXY(clientX, clientY, h){
+function updateHudByClientXY(clientX, clientY, h){
   const rect=canvas.getBoundingClientRect();
   const x=clientX-rect.left, y=clientY-rect.top;
   dragHud.style.left = x+'px'; dragHud.style.top = y+'px';
-
   const maxH = currentMaxHeight();
   const col = colorFromHeight(h, maxH);
-  const r = Math.round(col.r*255), g = Math.round(col.g*255), b = Math.round(col.b*255);
+  const r = Math.round(col.r*255), g=Math.round(col.g*255), b=Math.round(col.b*255);
   dragHud.style.background = `rgba(${r},${g},${b},0.9)`;
   dragHud.style.borderColor = `rgba(0,0,0,0.25)`;
   dragHud.textContent = `Z = ${h.toFixed(2)}`;
 }
 
-/* ====== マウス操作 ====== */
-let drag=null, lastY=0;
-canvas.addEventListener('mousemove',e=>{
-  if(drag){
-    const dy=e.clientY-lastY; lastY=e.clientY;
-    let sens=parseFloat(document.getElementById('dragSensitivity').value);
-    if(e.shiftKey) sens*=0.2; if(e.altKey) sens*=3.0;
-    drag.height += -dy*sens;
-    const s=parseFloat(document.getElementById('heightScale').value);
-    drag.mesh.position.z = drag.height*s;
-    if(drag.ui?.slider) drag.ui.slider.value=drag.height;
-    if(drag.ui?.num)    drag.ui.num.value=drag.height.toFixed(2);
-
-    updateColors();
-    updateHudAtClientXY(e.clientX, e.clientY, drag.height);
-    return;
-  }
-  const hit=pickFromClientXY(e.clientX, e.clientY);
-  canvas.classList.toggle('hovering',!!hit);
-});
-canvas.addEventListener('mousedown',e=>{
-  if(e.button!==0) return;
-  const hit=pickFromClientXY(e.clientX, e.clientY);
-  if(hit){ 
-    drag=hit; lastY=e.clientY; controls.enabled=false; canvas.classList.add('grabbing');
-    dragHud.style.display='block'; updateHudAtClientXY(e.clientX, e.clientY, drag.height);
-  }
-});
-addEventListener('mouseup',()=>{ 
-  if(drag) updateColors();
-  drag=null; controls.enabled=true; canvas.classList.remove('grabbing');
-  dragHud.style.display='none';
-});
-
-/* ====== タッチ操作（スマホ／タブレット） ====== */
-let activeTouchId = null;
-canvas.addEventListener('touchstart', (e)=>{
-  if(activeTouchId!==null) return;           // すでにドラッグ中なら無視
-  if(e.changedTouches.length===0) return;
-  const t = e.changedTouches[0];
-  const hit = pickFromClientXY(t.clientX, t.clientY);
-  if(hit){
-    e.preventDefault();                      // スクロールを抑止
-    drag = hit;
-    activeTouchId = t.identifier;
-    lastY = t.clientY;
+/* Pointer Events: pointerdown / pointermove / pointerup */
+canvas.addEventListener('pointerdown', (e)=>{
+  // 右クリック等は無視（タッチは button=0 として来る）
+  if (e.button !== 0) return;
+  const hit = pickFromClientXY(e.clientX, e.clientY);
+  if (hit){
+    draggingItem = hit;
+    lastClientY = e.clientY;
     controls.enabled = false;
     canvas.classList.add('grabbing');
-    dragHud.style.display='block';
-    updateHudAtClientXY(t.clientX, t.clientY, drag.height);
+    dragHud.style.display = 'block';
+    updateHudByClientXY(e.clientX, e.clientY, draggingItem.height);
+    // タッチ中のマウスイベント無効化のためキャプチャ
+    canvas.setPointerCapture(e.pointerId);
+    e.preventDefault();
   }
-}, {passive:false});
+});
 
-canvas.addEventListener('touchmove', (e)=>{
-  if(activeTouchId===null) return;
-  // 対象のタッチポイントを探す
-  let t = null;
-  for(const tt of e.changedTouches){ if(tt.identifier===activeTouchId){ t=tt; break; } }
-  if(!t) return;
-  e.preventDefault();
-  const dy = t.clientY - lastY; lastY = t.clientY;
-  let sens = parseFloat(dragSensitivity.value);
-  // モバイルでは修飾キーがないため、2本目の指が触れている間は粗調整、3本目なら微調整なども可能だが、
-  // まずは等倍に固定（必要なら拡張可能）
-  drag.height += -dy * sens;
-  const s=parseFloat(heightScale.value);
-  drag.mesh.position.z = drag.height*s;
-  if(drag.ui?.slider) drag.ui.slider.value=drag.height;
-  if(drag.ui?.num)    drag.ui.num.value=drag.height.toFixed(2);
+canvas.addEventListener('pointermove', (e)=>{
+  if (draggingItem){
+    const dy = e.clientY - lastClientY; lastClientY = e.clientY;
+    let sens=parseFloat(document.getElementById('dragSensitivity').value);
+    if(e.shiftKey) sens*=0.2; if(e.altKey) sens*=3.0;
+    draggingItem.height += -dy*sens;
 
-  updateColors();
-  updateHudAtClientXY(t.clientX, t.clientY, drag.height);
-}, {passive:false});
+    const s=parseFloat(document.getElementById('heightScale').value);
+    draggingItem.mesh.position.z = draggingItem.height*s;
+    draggingItem.pickMesh.position.z = draggingItem.height*s;
 
-function endTouchDrag(){
-  if(drag) updateColors();
-  drag=null; activeTouchId=null;
-  controls.enabled=true; canvas.classList.remove('grabbing');
-  dragHud.style.display='none';
+    if(draggingItem.ui?.slider) draggingItem.ui.slider.value=draggingItem.height;
+    if(draggingItem.ui?.num)    draggingItem.ui.num.value=draggingItem.height.toFixed(2);
+
+    updateColors(); // 最大値が動くので毎回再着色
+    updateHudByClientXY(e.clientX, e.clientY, draggingItem.height);
+    e.preventDefault();
+    return;
+  }
+  // ホバー表示（つかめる時だけカーソル変更）
+  const over = pickFromClientXY(e.clientX, e.clientY);
+  canvas.classList.toggle('hovering', !!over);
+});
+
+function endDrag(e){
+  if (draggingItem){
+    updateColors(); // 念のため確定再着色
+    draggingItem = null;
+    controls.enabled = true;
+    canvas.classList.remove('grabbing');
+    dragHud.style.display = 'none';
+    if (e) canvas.releasePointerCapture(e.pointerId);
+  }
 }
-canvas.addEventListener('touchend', (e)=>{
-  if(activeTouchId===null) return;
-  for(const tt of e.changedTouches){
-    if(tt.identifier===activeTouchId){ e.preventDefault(); endTouchDrag(); break; }
-  }
-}, {passive:false});
-canvas.addEventListener('touchcancel', (e)=>{
-  if(activeTouchId===null) return;
-  for(const tt of e.changedTouches){
-    if(tt.identifier===activeTouchId){ e.preventDefault(); endTouchDrag(); break; }
-  }
-}, {passive:false});
+canvas.addEventListener('pointerup', endDrag);
+canvas.addEventListener('pointercancel', endDrag);
+canvas.addEventListener('pointerleave', (e)=>{ if(draggingItem) endDrag(e); });
 
 /* ========== サイドバー/ビュー操作UI ========== */
 document.getElementById('bgColor').addEventListener('input',(e)=>{
@@ -697,9 +691,13 @@ document.getElementById('gridVisible').addEventListener('change',(e)=>{
 });
 document.getElementById('heightScale').addEventListener('input',()=>{
   const s=parseFloat(document.getElementById('heightScale').value);
-  for(const it of items) it.mesh.position.z = it.height*s;
+  for(const it of items){
+    it.mesh.position.z = it.height*s;
+    it.pickMesh.position.z = it.height*s;
+  }
   applyImageUI();
-  // 色は“生の高さ”基準なので倍率変更では色は不変
+  // 色は生の高さで正規化しているため倍率変更では不変。好みで再着色したい場合は下行を有効化:
+  // updateColors();
 });
 document.getElementById('viewSelect').addEventListener('change',(e)=>{
   const val = e.target.value;
@@ -707,6 +705,11 @@ document.getElementById('viewSelect').addEventListener('change',(e)=>{
   else if (val==='front') viewFront();
   else if (val==='side') viewSide();
   else fitView(chartGroup);
+});
+document.getElementById('projection').addEventListener('change',(e)=>{
+  const val = e.target.value;
+  if (val==='ortho') useOrthographic(); else usePerspective();
+  fitView(chartGroup);
 });
 document.getElementById('panelToggle').addEventListener('click',()=>{
   const isOpen = appRoot.getAttribute('data-panel')!=='closed';
@@ -735,22 +738,15 @@ document.getElementById('autoMode').addEventListener('change',()=>{
   if (on) { applyAutoHeights(); }
   else {
     for (const it of items){
-      it.height=0; it.mesh.position.z=0;
+      it.height=0; it.mesh.position.z=0; it.pickMesh.position.z=0;
       if (it.ui?.slider) it.ui.slider.value=0;
       if (it.ui?.num)    it.ui.num.value='0.00';
     }
-    updateColors(); // 全て0なら全赤
+    updateColors(); // 全て0なら全赤になる
   }
 });
 document.getElementById('gapFactor').addEventListener('input',()=>{ if (document.getElementById('autoMode').checked) applyAutoHeights(); });
 document.getElementById('autoBlend').addEventListener('input',()=>{ if (document.getElementById('autoMode').checked) applyAutoHeights(); });
-
-/* 投影法のUI */
-document.getElementById('projection').addEventListener('change',(e)=>{
-  const val = e.target.value;
-  if (val==='ortho') useOrthographic(); else usePerspective();
-  fitView(chartGroup);
-});
 
 /* 起動時に UI と実体を同期 */
 function syncUI(){

@@ -27,7 +27,7 @@
   header button,header label,header select{background:#fff;border:1px solid var(--border);color:#0f172a;padding:.45rem .7rem;border-radius:.5rem;cursor:pointer;font-size:13px}
   header input[type=file]{display:none}
   #viewer{position:relative;background:#fff}
-  #c{width:100%;height:100%}
+  #c{width:100%;height:100%; touch-action: none;} /* ← スクロール/ズームを抑止してドラッグを取りやすく */
   /* ステータスは非表示 */
   #status{display:none}
   #overlay{position:absolute;left:12px;bottom:12px;padding:.45rem .6rem;background:#ffffffcc;border:1px solid var(--border);border-radius:.6rem;font-size:12px;color:#334155}
@@ -89,7 +89,7 @@
   <div id="viewer">
     <canvas id="c"></canvas>
     <div id="status">起動OK</div>
-    <div id="overlay">左ドラッグ:回転 / 右ドラッグ:平行移動 / ホイール:ズーム / 線上ドラッグ:高さ変更（Shift=微調整 / Alt=粗調整）</div>
+    <div id="overlay">左ドラッグ/スワイプ:回転 / 2本指:平行移動 / ピンチ:ズーム / 線上ドラッグ:高さ変更（PCは Shift=微 / Alt=粗）</div>
     <div id="dragHud"></div>
   </div>
 
@@ -548,7 +548,7 @@ function buildList(orderByPressure=false){
       const s=parseFloat(document.getElementById('heightScale').value); 
       it.mesh.position.z=it.height*s; 
       num.value=it.height.toFixed(2); 
-      updateColors(); // ← 正規化が変わる可能性があるため全体再着色
+      updateColors(); // 正規化が変わる可能性があるため全体再着色
     };
     row1.append(lab,slider); card.appendChild(row1);
 
@@ -561,7 +561,7 @@ function buildList(orderByPressure=false){
       slider.value=v; 
       const s=parseFloat(document.getElementById('heightScale').value); 
       it.mesh.position.z=it.height*s; 
-      updateColors(); // ← 同上
+      updateColors();
     };
     row2.append(hint,num); card.appendChild(row2);
 
@@ -570,19 +570,18 @@ function buildList(orderByPressure=false){
   }
 }
 
-/* ピッキング＆ドラッグ（HUD付き） */
+/* ====== ピッキング：座標指定版（マウス/タッチ共通） ====== */
 const raycaster=new THREE.Raycaster(); const pointer=new THREE.Vector2();
-let hover=null, drag=null, lastY=0;
-function pick(e){
+function pickFromClientXY(clientX, clientY){
   const rect=canvas.getBoundingClientRect();
-  pointer.set((e.clientX-rect.left)/rect.width*2-1, -(e.clientY-rect.top)/rect.height*2+1);
+  pointer.set((clientX-rect.left)/rect.width*2-1, -(clientY-rect.top)/rect.height*2+1);
   raycaster.setFromCamera(pointer,camera);
   const hits=raycaster.intersectObjects(items.filter(x=>x.mesh.visible).map(x=>x.mesh),false);
   return hits[0]?items.find(x=>x.mesh===hits[0].object):null;
 }
-function updateHud(e, h){
+function updateHudAtClientXY(clientX, clientY, h){
   const rect=canvas.getBoundingClientRect();
-  const x=e.clientX-rect.left, y=e.clientY-rect.top;
+  const x=clientX-rect.left, y=clientY-rect.top;
   dragHud.style.left = x+'px'; dragHud.style.top = y+'px';
 
   const maxH = currentMaxHeight();
@@ -592,6 +591,9 @@ function updateHud(e, h){
   dragHud.style.borderColor = `rgba(0,0,0,0.25)`;
   dragHud.textContent = `Z = ${h.toFixed(2)}`;
 }
+
+/* ====== マウス操作 ====== */
+let drag=null, lastY=0;
 canvas.addEventListener('mousemove',e=>{
   if(drag){
     const dy=e.clientY-lastY; lastY=e.clientY;
@@ -603,25 +605,85 @@ canvas.addEventListener('mousemove',e=>{
     if(drag.ui?.slider) drag.ui.slider.value=drag.height;
     if(drag.ui?.num)    drag.ui.num.value=drag.height.toFixed(2);
 
-    updateColors();         // ← 毎フレーム全体再着色（最大値が変動し得るため）
-    updateHud(e, drag.height);
+    updateColors();
+    updateHudAtClientXY(e.clientX, e.clientY, drag.height);
     return;
   }
-  hover=pick(e); canvas.classList.toggle('hovering',!!hover);
+  const hit=pickFromClientXY(e.clientX, e.clientY);
+  canvas.classList.toggle('hovering',!!hit);
 });
 canvas.addEventListener('mousedown',e=>{
   if(e.button!==0) return;
-  const hit=pick(e);
+  const hit=pickFromClientXY(e.clientX, e.clientY);
   if(hit){ 
     drag=hit; lastY=e.clientY; controls.enabled=false; canvas.classList.add('grabbing');
-    dragHud.style.display='block'; updateHud(e, drag.height);
+    dragHud.style.display='block'; updateHudAtClientXY(e.clientX, e.clientY, drag.height);
   }
 });
 addEventListener('mouseup',()=>{ 
-  if(drag) updateColors(); // 念のため最終確定
+  if(drag) updateColors();
   drag=null; controls.enabled=true; canvas.classList.remove('grabbing');
   dragHud.style.display='none';
 });
+
+/* ====== タッチ操作（スマホ／タブレット） ====== */
+let activeTouchId = null;
+canvas.addEventListener('touchstart', (e)=>{
+  if(activeTouchId!==null) return;           // すでにドラッグ中なら無視
+  if(e.changedTouches.length===0) return;
+  const t = e.changedTouches[0];
+  const hit = pickFromClientXY(t.clientX, t.clientY);
+  if(hit){
+    e.preventDefault();                      // スクロールを抑止
+    drag = hit;
+    activeTouchId = t.identifier;
+    lastY = t.clientY;
+    controls.enabled = false;
+    canvas.classList.add('grabbing');
+    dragHud.style.display='block';
+    updateHudAtClientXY(t.clientX, t.clientY, drag.height);
+  }
+}, {passive:false});
+
+canvas.addEventListener('touchmove', (e)=>{
+  if(activeTouchId===null) return;
+  // 対象のタッチポイントを探す
+  let t = null;
+  for(const tt of e.changedTouches){ if(tt.identifier===activeTouchId){ t=tt; break; } }
+  if(!t) return;
+  e.preventDefault();
+  const dy = t.clientY - lastY; lastY = t.clientY;
+  let sens = parseFloat(dragSensitivity.value);
+  // モバイルでは修飾キーがないため、2本目の指が触れている間は粗調整、3本目なら微調整なども可能だが、
+  // まずは等倍に固定（必要なら拡張可能）
+  drag.height += -dy * sens;
+  const s=parseFloat(heightScale.value);
+  drag.mesh.position.z = drag.height*s;
+  if(drag.ui?.slider) drag.ui.slider.value=drag.height;
+  if(drag.ui?.num)    drag.ui.num.value=drag.height.toFixed(2);
+
+  updateColors();
+  updateHudAtClientXY(t.clientX, t.clientY, drag.height);
+}, {passive:false});
+
+function endTouchDrag(){
+  if(drag) updateColors();
+  drag=null; activeTouchId=null;
+  controls.enabled=true; canvas.classList.remove('grabbing');
+  dragHud.style.display='none';
+}
+canvas.addEventListener('touchend', (e)=>{
+  if(activeTouchId===null) return;
+  for(const tt of e.changedTouches){
+    if(tt.identifier===activeTouchId){ e.preventDefault(); endTouchDrag(); break; }
+  }
+}, {passive:false});
+canvas.addEventListener('touchcancel', (e)=>{
+  if(activeTouchId===null) return;
+  for(const tt of e.changedTouches){
+    if(tt.identifier===activeTouchId){ e.preventDefault(); endTouchDrag(); break; }
+  }
+}, {passive:false});
 
 /* ========== サイドバー/ビュー操作UI ========== */
 document.getElementById('bgColor').addEventListener('input',(e)=>{
@@ -637,9 +699,7 @@ document.getElementById('heightScale').addEventListener('input',()=>{
   const s=parseFloat(document.getElementById('heightScale').value);
   for(const it of items) it.mesh.position.z = it.height*s;
   applyImageUI();
-  // 色は「生の高さ」で正規化しているので倍率変更では色は不変だが、
-  // 表示意図に応じて再着色するなら以下を有効化：
-  // updateColors();
+  // 色は“生の高さ”基準なので倍率変更では色は不変
 });
 document.getElementById('viewSelect').addEventListener('change',(e)=>{
   const val = e.target.value;
@@ -679,7 +739,7 @@ document.getElementById('autoMode').addEventListener('change',()=>{
       if (it.ui?.slider) it.ui.slider.value=0;
       if (it.ui?.num)    it.ui.num.value='0.00';
     }
-    updateColors(); // 全て0なら全赤になる
+    updateColors(); // 全て0なら全赤
   }
 });
 document.getElementById('gapFactor').addEventListener('input',()=>{ if (document.getElementById('autoMode').checked) applyAutoHeights(); });
